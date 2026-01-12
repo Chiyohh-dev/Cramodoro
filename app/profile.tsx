@@ -4,47 +4,87 @@ import { useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import { Alert, Image, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 import { userAPI } from "../api/api";
+import { BottomNav } from "../components/BottomNav";
+import { Button } from "../components/Button";
+import { Header } from "../components/Header";
+import localAuth from "../utils/localAuth";
 
 export default function Profile() {
   const router = useRouter();
   const [userData, setUserData] = useState({
     name: "",
     bio: "",
-    profilePic: require('../cramodoro-assets/defaultpfp.png'),
+    profilePic: require('../assets/cramodoro-assets/defaultpfp.png'),
   });
   const [isLoading, setIsLoading] = useState(true);
 
   useFocusEffect(
     useCallback(() => {
+      let isMounted = true;
+      
+      const loadProfile = async () => {
+        try {
+          const token = await AsyncStorage.getItem('authToken');
+          if (!isMounted) return;
+          
+          if (!token) {
+            router.replace('/');
+            return;
+          }
+
+          let response;
+          
+          if (token.startsWith('offline_')) {
+            const user = await localAuth.getProfile(token);
+            response = { user };
+          } else {
+            try {
+              response = await userAPI.getProfile(token);
+            } catch (backendErr) {
+              const user = await localAuth.getProfile(token);
+              response = { user };
+            }
+          }
+          
+          if (!isMounted) return;
+          
+          const profilePicSource = response.user.profilePicture 
+            ? { uri: response.user.profilePicture } 
+            : require('../assets/cramodoro-assets/defaultpfp.png');
+          
+          setUserData({
+            name: response.user.name || response.user.username || "",
+            bio: response.user.bio || "",
+            profilePic: profilePicSource,
+          });
+          
+          // Cache profile picture in userData for persistence
+          if (response.user.profilePicture) {
+            const userData = await AsyncStorage.getItem('userData');
+            if (userData) {
+              const user = JSON.parse(userData);
+              user.profilePicture = response.user.profilePicture;
+              await AsyncStorage.setItem('userData', JSON.stringify(user));
+            }
+          }
+        } catch (error) {
+          if (!isMounted) return;
+          console.error('Error loading profile:', error);
+          Alert.alert('Error', 'Failed to load profile');
+        } finally {
+          if (isMounted) {
+            setIsLoading(false);
+          }
+        }
+      };
+      
       loadProfile();
+      
+      return () => {
+        isMounted = false;
+      };
     }, [])
   );
-
-  const loadProfile = async () => {
-    try {
-      const token = await AsyncStorage.getItem('authToken');
-      if (!token) {
-        router.replace('/');
-        return;
-      }
-
-      const response = await userAPI.getProfile(token);
-      const profilePicSource = response.user.profilePicture 
-        ? { uri: response.user.profilePicture } 
-        : require('../cramodoro-assets/defaultpfp.png');
-      
-      setUserData({
-        name: response.user.name || "",
-        bio: response.user.bio || "",
-        profilePic: profilePicSource,
-      });
-    } catch (error) {
-      console.error('Error loading profile:', error);
-      Alert.alert('Error', 'Failed to load profile');
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleLogout = async () => {
     Alert.alert(
@@ -67,38 +107,50 @@ export default function Profile() {
 
   return (
     <View style={styles.container}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Image 
-          source={require('../cramodoro-assets/homescreen-icon.png')} 
-          style={styles.logo}
-          resizeMode="contain"
-        />
-      </View>
+      <Header />
 
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView 
+        style={styles.content} 
+        showsVerticalScrollIndicator={false}
+        accessible={true}
+        accessibilityRole="scrollbar"
+        accessibilityLabel="Profile information"
+      >
         {/* Profile Picture */}
         <View style={styles.profileSection}>
           <Image 
             source={userData.profilePic}
             style={styles.profilePic}
             resizeMode="cover"
+            accessible={true}
+            accessibilityLabel="Profile picture"
+            accessibilityRole="image"
           />
           <TouchableOpacity 
             style={styles.editLink}
             onPress={() => router.push('/edit-profile')}
+            accessible={true}
+            accessibilityRole="button"
+            accessibilityLabel="Edit profile"
+            accessibilityHint="Opens profile editor"
           >
             <Image 
-              source={require('../cramodoro-assets/edit-icon.png')} 
+              source={require('../assets/cramodoro-assets/edit-icon.png')} 
               style={styles.editIcon}
               resizeMode="contain"
+              accessible={false}
             />
             <Text style={styles.editText}>edit</Text>
           </TouchableOpacity>
         </View>
 
         {/* Name Section */}
-        <View style={styles.infoSection}>
+        <View 
+          style={styles.infoSection}
+          accessible={true}
+          accessibilityLabel={`Name: ${userData.name || "Not set"}`}
+          accessibilityRole="text"
+        >
           <Text style={styles.label}>Name</Text>
           <Text style={[styles.nameValue, !userData.name && styles.placeholderText]}>
             {userData.name || "Your name here..."}
@@ -106,7 +158,12 @@ export default function Profile() {
         </View>
 
         {/* Bio Section */}
-        <View style={styles.infoSection}>
+        <View 
+          style={styles.infoSection}
+          accessible={true}
+          accessibilityLabel={`Bio: ${userData.bio || "Not set"}`}
+          accessibilityRole="text"
+        >
           <Text style={styles.label}>Bio</Text>
           <View style={styles.bioBox}>
             <Text style={[styles.bioText, !userData.bio && styles.placeholderText]}>
@@ -116,45 +173,17 @@ export default function Profile() {
         </View>
 
         {/* Log Out Button */}
-        <TouchableOpacity 
-          style={styles.logoutButton}
+        <Button
+          title="Log out"
           onPress={handleLogout}
-        >
-          <Text style={styles.logoutText}>Log out</Text>
-        </TouchableOpacity>
+          variant="danger"
+          style={styles.logoutButton}
+          accessibilityLabel="Log out"
+          accessibilityHint="Logs you out and returns to login screen"
+        />
       </ScrollView>
 
-      {/* Bottom Navigation */}
-      <View style={styles.bottomNav}>
-        <TouchableOpacity 
-          style={styles.navItem}
-          onPress={() => router.push('/home')}
-        >
-          <Image 
-            source={require('../cramodoro-assets/home.png')} 
-            style={styles.navIcon}
-            resizeMode="contain"
-          />
-        </TouchableOpacity>
-        
-        <TouchableOpacity 
-          style={styles.navItem}
-        >
-          <Image 
-            source={require('../cramodoro-assets/card.png')} 
-            style={styles.navIcon}
-            resizeMode="contain"
-          />
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.navItem}>
-          <Image 
-            source={userData.profilePic} 
-            style={styles.profileIconActive}
-            resizeMode="cover"
-          />
-        </TouchableOpacity>
-      </View>
+      <BottomNav activeRoute="profile" profilePic={userData.profilePic} />
     </View>
   );
 }
@@ -163,18 +192,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
-  },
-  header: {
-    alignItems: 'center',
-    paddingTop: 20,
-    paddingBottom: 20,
-    paddingHorizontal: 20,
-    backgroundColor: '#fff',
-  },
-  logo: {
-    width: '25%',
-    aspectRatio: 1,
-    maxWidth: 100,
   },
   content: {
     flex: 1,
@@ -239,41 +256,7 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
   logoutButton: {
-    backgroundColor: '#DC3545',
-    paddingVertical: 14,
-    borderRadius: 25,
-    alignItems: 'center',
     marginTop: '6%',
     marginBottom: '8%',
-    width: '100%',
-  },
-  logoutText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-  },
-  bottomNav: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 40,
-    backgroundColor: '#fff',
-    borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
-  },
-  navItem: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-  },
-  navIcon: {
-    width: 35,
-    height: 35,
-  },
-  profileIconActive: {
-    width: 35,
-    height: 35,
-    borderRadius: 20,
   },
 });

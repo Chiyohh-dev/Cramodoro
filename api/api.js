@@ -1,70 +1,137 @@
-// API configuration - pick a host that works for simulator/emulator/device
-const { Platform } = require('react-native');
+import NetInfo from '@react-native-community/netinfo';
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 
-// IMPORTANT: Backend server IP configuration
-// When using Expo Tunnel (default): backend must be accessible via ngrok or similar
-// For physical device on LAN: set this to your computer's local IP (run ipconfig on Windows)
-// For emulators: Android uses 10.0.2.2, iOS uses localhost
-const MANUAL_IP = '10.110.171.56'; // Your computer's IP on local network
+const BACKEND_TUNNEL_URL = 'https://jackson-veristic-instantaneously.ngrok-free.dev/api';
+const MANUAL_IP = '10.110.171.56';
+const DEFAULT_ANDROID_HOST = '10.0.2.2';
+const BACKEND_PORT = 5000;
 
-// Option 1: Use a public tunnel for backend (recommended for Expo Tunnel mode)
-// Uncomment and set this if you're exposing your backend via ngrok or similar:
-// const BACKEND_TUNNEL_URL = 'https://your-ngrok-url.ngrok.io/api';
+const envTunnelUrl = (typeof process !== 'undefined' && process.env && process.env.BACKEND_TUNNEL_URL)
+  || (Constants && (Constants.manifest?.extra?.BACKEND_TUNNEL_URL || Constants.expoConfig?.extra?.BACKEND_TUNNEL_URL))
+  || BACKEND_TUNNEL_URL;
 
-// Option 2: Use local network IP (works on LAN with physical devices)
 let API_HOST = 'localhost';
-
 try {
-  // Try to read Expo debugger host to infer LAN IP when using Expo Go
-  const Constants = require('expo-constants');
-  const manifest = Constants.manifest || Constants.expoConfig || {};
+  const manifest = Constants?.manifest || Constants?.expoConfig || {};
   const debuggerHost = (manifest?.debuggerHost || '').split(':')[0];
   if (debuggerHost) {
     API_HOST = debuggerHost;
-    console.log('📡 Using Expo debugger host:', debuggerHost);
   } else if (MANUAL_IP && MANUAL_IP !== 'localhost') {
-    // Fallback to manual IP for physical devices
     API_HOST = MANUAL_IP;
-    console.log('📡 Using manual IP:', MANUAL_IP);
   }
 } catch (e) {
-  // Fallback to manual IP if expo-constants is not available
   if (MANUAL_IP && MANUAL_IP !== 'localhost') {
     API_HOST = MANUAL_IP;
-    console.log('📡 Using manual IP (fallback):', MANUAL_IP);
   }
 }
 
-// Android emulator (default) needs 10.0.2.2 to reach host machine
-const DEFAULT_ANDROID_HOST = '10.0.2.2';
-
-// Uncomment this line to use backend tunnel URL:
-// const API_URL = BACKEND_TUNNEL_URL;
-
-// Default: use local/LAN configuration
 const resolvedHost = Platform.OS === 'android' && API_HOST === 'localhost' ? DEFAULT_ANDROID_HOST : API_HOST;
-const API_URL = `http://${resolvedHost}:5000/api`;
+const LAN_API_URL = `http://${resolvedHost}:${BACKEND_PORT}/api`;
 
-console.log('🌐 API URL:', API_URL);
-
-// Storage key for auth token
+// Prefer LAN (localhost) for offline operation. Ngrok tunnel remains available as fallback.
+let USE_TUNNEL_PRIORITY = process.env.USE_TUNNEL === 'true' || false;
+const API_URL = USE_TUNNEL_PRIORITY ? envTunnelUrl : LAN_API_URL;
 const TOKEN_KEY = 'authToken';
 
-// API helper function
-const apiRequest = async (endpoint, options = {}) => {
+// Network state tracking
+let isConnected = true;
+let connectionType = 'unknown';
+let backendAvailable = null; // null = not checked, true = available, false = offline
+let useTunnelForRequests = false; // Set to true when tunnel is the working connection
+
+NetInfo.addEventListener(state => {
+  isConnected = state.isConnected ?? true;
+  connectionType = state.type;
+  console.log('📡 Network status:', { isConnected, type: connectionType });
+});
+
+export const getNetworkStatus = async () => {
+  const state = await NetInfo.fetch();
+  return {
+    isConnected: state.isConnected ?? false,
+    type: state.type,
+    isInternetReachable: state.isInternetReachable ?? false
+  };
+};
+
+// Quick backend health check with short timeout
+export const checkBackendHealth = async () => {
+  if (backendAvailable !== null) {
+    return backendAvailable;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+
+  try {
+    console.log('🔍 Checking backend availability...');
+    console.log(`   Trying: ${envTunnelUrl}/health`);
+    
+    // Try ngrok tunnel first (more reliable for emulator)
+    const response = await fetch(`${envTunnelUrl}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        'ngrok-skip-browser-warning': 'true', // Skip ngrok browser warning page
+      },
+    });
+    clearTimeout(timeoutId);
+    
+    if (response.ok) {
+      console.log('✅ Backend is available via tunnel - Online mode');
+      backendAvailable = true;
+      useTunnelForRequests = true; // Use tunnel for all subsequent requests
+    } else {
+      console.log('📴 Backend not responding - Offline mode');
+      backendAvailable = false;
+    }
+  } catch (error) {
+    clearTimeout(timeoutId);
+    console.log('📴 Backend not available via tunnel - Offline mode');
+    backendAvailable = false;
+  }
+
+  return backendAvailable;
+};
+
+// Reset backend check (useful for manual retry)
+export const resetBackendCheck = () => {
+  backendAvailable = null;
+  useTunnelForRequests = false;
+};
+
+const apiRequest = async (endpoint, options = {}, retryCount = 0) => {
   const config = {
     ...options,
     headers: {
       'Content-Type': 'application/json',
+      'ngrok-skip-browser-warning': 'true', // Skip ngrok warning page
       ...options.headers,
     },
   };
 
-  try {
-    const response = await fetch(`${API_URL}${endpoint}`, config);
+  // If health check determined tunnel works, use it first. Otherwise try LAN first.
+  const urls = useTunnelForRequests 
+    ? [envTunnelUrl, LAN_API_URL]
+    : [LAN_API_URL, envTunnelUrl];
 
-    // If response has no json body (network error or non-json), handle gracefully
+  const currentUrl = urls[retryCount] || urls[0];
+  const isLastAttempt = retryCount >= urls.length - 1;
+
+  // Add timeout for faster fallback
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+  try {
+    console.log(`🌐 Attempting request to: ${currentUrl}${endpoint}`);
+    const response = await fetch(`${currentUrl}${endpoint}`, {
+      ...config,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
     let data = null;
+    
     try {
       data = await response.json();
     } catch (parseErr) {
@@ -76,21 +143,38 @@ const apiRequest = async (endpoint, options = {}) => {
       throw new Error(message);
     }
 
+    console.log(`✅ Request successful to: ${currentUrl}`);
     return data;
   } catch (err) {
-    // Normalize network errors for UI
+    clearTimeout(timeoutId);
+    console.error(`❌ Request failed to: ${currentUrl}`, err.message);
+    
     if (err instanceof Error) {
-      // Common network failure message from React Native fetch
-      if (err.message === 'Network request failed') {
-        throw new Error('Network request failed - is the backend server running?');
+      // Network error or timeout - try fallback URL if available
+      const isNetworkError = err.message === 'Network request failed' || 
+                            err.name === 'AbortError' || 
+                            err.message.includes('aborted');
+      
+      if (isNetworkError && !isLastAttempt) {
+        console.log(`🔄 Retrying with fallback URL...`);
+        return apiRequest(endpoint, options, retryCount + 1);
       }
+      
+      // All attempts failed
+      if (err.message === 'Network request failed') {
+        const networkStatus = await getNetworkStatus();
+        if (!networkStatus.isConnected) {
+          throw new Error('No internet connection. Please check your network settings.');
+        }
+        throw new Error('Cannot reach backend server. Make sure:\n1. MongoDB is running\n2. Backend server is running (npm run dev)\n3. Android emulator can reach 10.0.2.2:5000');
+      }
+      
       throw err;
     }
     throw new Error('Unknown error');
   }
 };
 
-// Auth API
 export const authAPI = {
   login: async (usernameOrEmail, password) => {
     return apiRequest('/auth/login', {
@@ -107,7 +191,6 @@ export const authAPI = {
   },
 };
 
-// User API
 export const userAPI = {
   getProfile: async (token) => {
     return apiRequest('/users/profile', {
@@ -138,5 +221,49 @@ export const userAPI = {
   },
 };
 
-export { API_URL, TOKEN_KEY };
+export const deckAPI = {
+  // Get all decks from backend
+  getDecks: async (token) => {
+    return apiRequest('/decks', {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+
+  // Create deck on backend
+  create: async (token, deckData) => {
+    return apiRequest('/decks', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(deckData),
+    });
+  },
+
+  // Update deck on backend
+  update: async (token, deckId, deckData) => {
+    return apiRequest(`/decks/${deckId}`, {
+      method: 'PUT',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(deckData),
+    });
+  },
+
+  // Delete deck on backend
+  delete: async (token, deckId) => {
+    return apiRequest(`/decks/${deckId}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  },
+};
+
+export { API_URL, LAN_API_URL, TOKEN_KEY, envTunnelUrl as TUNNEL_URL };
 

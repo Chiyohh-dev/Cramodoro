@@ -7,7 +7,7 @@ export default function Index() {
   return (
     <View style={styles.container}>
       <Image 
-        source={require('../cramodoro-assets/login-logo.png')} 
+        source={require('../assets/cramodoro-assets/login-logo.png')} 
         style={styles.logo}
         resizeMode="contain"
       />

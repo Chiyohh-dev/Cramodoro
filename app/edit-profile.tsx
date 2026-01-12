@@ -1,47 +1,79 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import NetInfo from '@react-native-community/netinfo';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from "expo-router";
 import { useEffect, useState } from "react";
 import { Alert, Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { userAPI } from "../api/api";
+import localAuth from "../utils/localAuth";
+import syncManager from "../utils/syncManager";
 
 export default function EditProfile() {
   const router = useRouter();
   const [name, setName] = useState("");
   const [bio, setBio] = useState("");
-  const [fontSize, setFontSize] = useState("14");
-  const [profilePic, setProfilePic] = useState(require('../cramodoro-assets/defaultpfp.png'));
+  const [profilePic, setProfilePic] = useState(require('../assets/cramodoro-assets/defaultpfp.png'));
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
+    
+    const loadProfile = async () => {
+      try {
+        const token = await AsyncStorage.getItem('authToken');
+        if (!isMounted) return;
+        
+        if (!token) {
+          router.replace('/');
+          return;
+        }
+
+        let response;
+        
+        if (token.startsWith('offline_')) {
+          const user = await localAuth.getProfile(token);
+          response = { user };
+        } else {
+          try {
+            response = await userAPI.getProfile(token);
+          } catch (backendErr) {
+            const user = await localAuth.getProfile(token);
+            response = { user };
+          }
+        }
+        
+        if (!isMounted) return;
+        
+        setName(response.user.name || response.user.username || "");
+        setBio(response.user.bio || "");
+        
+        if (response.user.profilePicture) {
+          setProfilePic({ uri: response.user.profilePicture });
+          
+          // Cache profile picture in userData for persistence
+          const userData = await AsyncStorage.getItem('userData');
+          if (userData) {
+            const user = JSON.parse(userData);
+            user.profilePicture = response.user.profilePicture;
+            await AsyncStorage.setItem('userData', JSON.stringify(user));
+          }
+        }
+      } catch (error) {
+        if (!isMounted) return;
+        console.error('Error loading profile:', error);
+        Alert.alert('Error', 'Failed to load profile');
+      }
+    };
+    
     loadProfile();
+    
+    return () => {
+      isMounted = false;
+    };
   }, []);
-
-  const loadProfile = async () => {
-    try {
-      const token = await AsyncStorage.getItem('authToken');
-      if (!token) {
-        router.replace('/');
-        return;
-      }
-
-      const response = await userAPI.getProfile(token);
-      setName(response.user.name || "");
-      setBio(response.user.bio || "");
-      setFontSize(response.user.fontSize?.toString() || "14");
-      
-      if (response.user.profilePicture) {
-        setProfilePic({ uri: response.user.profilePicture });
-      }
-    } catch (error) {
-      console.error('Error loading profile:', error);
-      Alert.alert('Error', 'Failed to load profile');
-    }
-  };
 
   const pickImage = async () => {
     try {
-      // Request permission
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       
       if (status !== 'granted') {
@@ -52,18 +84,16 @@ export default function EditProfile() {
         return;
       }
 
-      // Launch image picker
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
         allowsEditing: true,
         aspect: [1, 1],
-        quality: 0.5, // Reduce quality for smaller base64 size
-        base64: true, // Get base64 encoding
+        quality: 0.5,
+        base64: true,
       });
 
       if (!result.canceled && result.assets[0]) {
         const asset = result.assets[0];
-        // Convert to base64 data URI for storage
         const base64Image = `data:image/jpeg;base64,${asset.base64}`;
         setProfilePic({ uri: base64Image });
         Alert.alert('Success', 'Profile picture updated! Don\'t forget to save changes.');
@@ -84,28 +114,60 @@ export default function EditProfile() {
         return;
       }
 
-      // Prepare update data
       const updateData: { 
-        name: string; 
-        bio: string; 
-        fontSize: number;
+        name?: string;
+        username?: string; 
+        bio?: string; 
         profilePicture?: string;
       } = { 
-        name, 
-        bio, 
-        fontSize: parseInt(fontSize)
+        name,
+        username: name, 
+        bio
       };
 
-      // If profile picture is a URI (not the default require), send it
+      // Only include profile picture if it has changed (has uri property)
       if (profilePic && typeof profilePic === 'object' && 'uri' in profilePic) {
-        updateData.profilePicture = profilePic.uri;
+        const uri = profilePic.uri as string;
+        // Only include if it's a data URI (base64) or actual URI, not the default require()
+        if (uri && (uri.startsWith('data:') || uri.startsWith('http') || uri.startsWith('file'))) {
+          updateData.profilePicture = uri;
+        }
       }
 
-      await userAPI.updateProfile(token, updateData);
+      const networkState = await NetInfo.fetch();
+      
+      // Always try to update locally first (for cache)
+      console.log('💾 Updating profile locally');
+      await localAuth.updateProfile(token, updateData);
+      
+      // Update userData cache as well
+      const userData = await AsyncStorage.getItem('userData');
+      if (userData) {
+        const user = JSON.parse(userData);
+        if (updateData.name) user.name = updateData.name;
+        if (updateData.username) user.username = updateData.username;
+        if (updateData.bio !== undefined) user.bio = updateData.bio;
+        if (updateData.profilePicture) user.profilePicture = updateData.profilePicture;
+        await AsyncStorage.setItem('userData', JSON.stringify(user));
+      }
+      
+      // Then try backend if online
+      if (networkState.isConnected && !token.startsWith('offline_')) {
+        try {
+          console.log('☁️ Syncing to backend');
+          await userAPI.updateProfile(token, updateData);
+          console.log('✅ Profile synced to backend');
+        } catch (backendErr) {
+          console.log('⚠️ Backend sync failed, queued for later');
+          await syncManager.queueSync('profile', 'update', updateData);
+        }
+      } else {
+        // Queue for sync when online
+        await syncManager.queueSync('profile', 'update', updateData);
+      }
 
       Alert.alert('Success', 'Profile updated successfully');
       
-      // Navigate back - profile will auto-refresh with useFocusEffect
       router.back();
     } catch (error) {
       console.error('Update error:', error);
@@ -118,10 +180,12 @@ export default function EditProfile() {
 
   return (
     <View style={styles.container}>
-      {/* Header with back button */}
       <View style={styles.header}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Text style={styles.backArrow}>←</Text>
+        </TouchableOpacity>
         <Image 
-          source={require('../cramodoro-assets/homescreen-icon.png')} 
+          source={require('../assets/cramodoro-assets/homescreen-icon.png')} 
           style={styles.logo}
           resizeMode="contain"
         />
@@ -129,7 +193,6 @@ export default function EditProfile() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Profile Picture */}
         <View style={styles.profileSection}>
           <Image 
             source={profilePic}
@@ -141,7 +204,7 @@ export default function EditProfile() {
             onPress={pickImage}
           >
             <Image 
-              source={require('../cramodoro-assets/edit-icon.png')} 
+              source={require('../assets/cramodoro-assets/edit-icon.png')} 
               style={styles.editIcon}
               resizeMode="contain"
             />
@@ -149,7 +212,6 @@ export default function EditProfile() {
           </TouchableOpacity>
         </View>
 
-        {/* Name Section */}
         <View style={styles.infoSection}>
           <Text style={styles.label}>Name</Text>
           <TextInput
@@ -161,7 +223,6 @@ export default function EditProfile() {
           />
         </View>
 
-        {/* Bio Section */}
         <View style={styles.infoSection}>
           <Text style={styles.label}>Bio</Text>
           <TextInput
@@ -175,26 +236,6 @@ export default function EditProfile() {
           />
         </View>
 
-        {/* Cards Section */}
-        <View style={styles.infoSection}>
-          <Text style={styles.label}>Cards</Text>
-          <View style={styles.fontSizeSection}>
-            <Text style={styles.subLabel}>Font Size</Text>
-            <View style={styles.fontSizeSelector}>
-              <TextInput
-                style={styles.fontSizeInput}
-                value={fontSize}
-                onChangeText={setFontSize}
-                keyboardType="numeric"
-              />
-              <TouchableOpacity style={styles.dropdown}>
-                <Text style={styles.dropdownArrow}>▼</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-
-        {/* Save Changes Button */}
         <TouchableOpacity 
           style={[styles.saveButton, isLoading && styles.saveButtonDisabled]}
           onPress={handleSave}
@@ -206,14 +247,13 @@ export default function EditProfile() {
         </TouchableOpacity>
       </ScrollView>
 
-      {/* Bottom Navigation */}
       <View style={styles.bottomNav}>
         <TouchableOpacity 
           style={styles.navItem}
           onPress={() => router.push('/home')}
         >
           <Image 
-            source={require('../cramodoro-assets/home.png')} 
+            source={require('../assets/cramodoro-assets/home.png')} 
             style={styles.navIcon}
             resizeMode="contain"
           />
@@ -221,7 +261,7 @@ export default function EditProfile() {
         
         <TouchableOpacity style={styles.navItem}>
           <Image 
-            source={require('../cramodoro-assets/card.png')} 
+            source={require('../assets/cramodoro-assets/card.png')} 
             style={styles.navIcon}
             resizeMode="contain"
           />
@@ -248,11 +288,23 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   header: {
+    flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     paddingTop: 20,
     paddingBottom: 20,
     paddingHorizontal: 20,
     backgroundColor: '#fff',
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  backArrow: {
+    fontSize: 28,
+    color: '#2196F3',
   },
   logo: {
     width: '25%',
@@ -270,7 +322,8 @@ const styles = StyleSheet.create({
   profileSection: {
     alignItems: 'center',
     marginTop: '4%',
-    marginBottom: '-35%',
+    marginBottom: '8%',
+    zIndex: 10,
   },
   profilePic: {
     width: '45%',
@@ -278,12 +331,14 @@ const styles = StyleSheet.create({
     aspectRatio: 1,
     maxWidth: 180,
     borderRadius: 9999,
-    marginBottom: '2%',
+    marginBottom: '3%',
   },
   changeLink: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
+    padding: 8,
+    zIndex: 10,
   },
   editIcon: {
     width: 16,
@@ -327,36 +382,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#2196F3',
     width: '100%',
-  },
-  fontSizeSection: {
-    marginTop: 10,
-  },
-  subLabel: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 8,
-  },
-  fontSizeSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  fontSizeInput: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 16,
-    width: 60,
-    backgroundColor: '#f5f5f5',
-  },
-  dropdown: {
-    marginLeft: 8,
-    padding: 8,
-  },
-  dropdownArrow: {
-    fontSize: 12,
-    color: '#666',
   },
   saveButton: {
     backgroundColor: '#2196F3',

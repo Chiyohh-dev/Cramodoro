@@ -2,8 +2,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from "expo-router";
 import { useState } from "react";
 import { ActivityIndicator, Alert, Image, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { authAPI, checkBackendHealth } from "../api/api";
+import localAuth from "../utils/localAuth";
+import syncManager from "../utils/syncManager";
 
-// Validation helper functions
 const isValidEmail = (email: string): boolean => {
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return emailRegex.test(email);
@@ -25,7 +27,6 @@ export default function Signup() {
   const [error, setError] = useState("");
 
   const handleSignup = async () => {
-    // Validation
     const trimmedEmail = email.trim().toLowerCase();
     
     if (!trimmedEmail) {
@@ -48,6 +49,11 @@ export default function Signup() {
       return;
     }
     
+    if (password.includes(' ')) {
+      setError("Password cannot contain spaces");
+      return;
+    }
+    
     if (password.length < 6) {
       setError("Password must be at least 6 characters");
       return;
@@ -63,6 +69,11 @@ export default function Signup() {
       return;
     }
     
+    if (!confirmPassword) {
+      setError("Please confirm your password");
+      return;
+    }
+    
     if (password !== confirmPassword) {
       setError("Passwords do not match");
       return;
@@ -72,17 +83,47 @@ export default function Signup() {
     setIsLoading(true);
 
     try {
-      // Simulate signup - frontend only
-      await new Promise(resolve => setTimeout(resolve, 500));
+      // Quick backend health check (2 second timeout)
+      const isBackendAvailable = await checkBackendHealth();
+      let response;
       
-      // Save mock data to AsyncStorage
-      await AsyncStorage.setItem('authToken', 'mock-token-' + Date.now());
-      await AsyncStorage.setItem('userData', JSON.stringify({ email: trimmedEmail }));
+      if (!isBackendAvailable) {
+        console.log('📴 Offline mode - creating local account');
+        response = await localAuth.signup(trimmedEmail, password, confirmPassword);
+      } else {
+        try {
+          console.log('🌐 Backend available - creating backend account');
+          response = await authAPI.signup(trimmedEmail, password, confirmPassword);
+          
+          // Cache backend credentials locally for offline access
+          console.log('💾 Caching credentials for offline use');
+          try {
+            await localAuth.cacheBackendUser(trimmedEmail, password, response);
+          } catch (cacheErr) {
+            console.error('⚠️ Failed to cache credentials, but continuing:', cacheErr);
+            // Don't fail the signup if caching fails
+          }
+        } catch (backendErr) {
+          console.log('⚠️ Backend signup failed, creating local account');
+          response = await localAuth.signup(trimmedEmail, password, confirmPassword);
+        }
+      }
+      
+      await AsyncStorage.setItem('authToken', response.token);
+      await AsyncStorage.setItem('userData', JSON.stringify(response.user));
+      
+      // Clear any existing decks from previous accounts
+      await AsyncStorage.removeItem('decks');
+      console.log('🧹 Cleared local decks for new account');
+      
+      // Setup auto-sync
+      if (response.token && isBackendAvailable) {
+        syncManager.setupAutoSync(response.token);
+      }
       
       Alert.alert('Success', 'Account created successfully!');
       
-      // Navigate back to landing
-      router.replace('/');
+      router.replace('/home');
     } catch (err) {
       console.error('Signup error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Failed to create account';
@@ -96,7 +137,7 @@ export default function Signup() {
   return (
     <View style={styles.container}>
       <Image 
-        source={require('../cramodoro-assets/login-logo.png')} 
+        source={require('../assets/cramodoro-assets/login-logo.png')} 
         style={styles.logo}
         resizeMode="contain"
       />
@@ -128,8 +169,8 @@ export default function Signup() {
           >
             <Image 
               source={showPassword 
-                ? require('../cramodoro-assets/hidepass-icon.png')
-                : require('../cramodoro-assets/showpass-icon.png')
+                ? require('../assets/cramodoro-assets/hidepass-icon.png')
+                : require('../assets/cramodoro-assets/showpass-icon.png')
               } 
               style={styles.iconImage}
               resizeMode="contain"
@@ -153,8 +194,8 @@ export default function Signup() {
           >
             <Image 
               source={showConfirmPassword 
-                ? require('../cramodoro-assets/hidepass-icon.png')
-                : require('../cramodoro-assets/showpass-icon.png')
+                ? require('../assets/cramodoro-assets/hidepass-icon.png')
+                : require('../assets/cramodoro-assets/showpass-icon.png')
               } 
               style={styles.iconImage}
               resizeMode="contain"

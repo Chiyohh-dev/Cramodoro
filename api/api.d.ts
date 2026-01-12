@@ -51,5 +51,40 @@ export const userAPI: {
   deleteAccount: (token: string) => Promise<{ message: string }>;
 };
 
+export interface DeckResponse {
+  _id: string;
+  name: string;
+  pomodoroMinutes: number;
+  restMinutes: number;
+  cards: Array<{
+    _id: string;
+    question: string;
+    answer: string;
+  }>;
+}
+
+export interface DecksResponse {
+  decks: DeckResponse[];
+}
+
+export const deckAPI: {
+  getDecks: (token: string) => Promise<DecksResponse>;
+  create: (token: string, deckData: any) => Promise<{ deck: DeckResponse }>;
+  update: (token: string, deckId: string, deckData: any) => Promise<{ deck: DeckResponse }>;
+  delete: (token: string, deckId: string) => Promise<{ message: string }>;
+};
+
+export function getNetworkStatus(): Promise<{
+  isConnected: boolean;
+  type: string | null;
+  isInternetReachable: boolean;
+}>;
+
+export function checkBackendHealth(): Promise<boolean>;
+
+export function resetBackendCheck(): void;
+
 export const API_URL: string;
 export const TOKEN_KEY: string;
+export const LAN_API_URL: string;
+export const TUNNEL_URL: string;
