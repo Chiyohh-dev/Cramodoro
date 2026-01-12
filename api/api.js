@@ -140,6 +140,9 @@ const apiRequest = async (endpoint, options = {}, retryCount = 0) => {
 
     if (!response.ok) {
       const message = data?.error?.message || data?.message || 'Something went wrong';
+      console.error(`❌ Request failed to: ${currentUrl}`, message);
+      console.error('Response status:', response.status);
+      console.error('Response data:', JSON.stringify(data, null, 2));
       throw new Error(message);
     }
 

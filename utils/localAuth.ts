@@ -155,7 +155,7 @@ export const localAuth = {
       const storedUserData = await AsyncStorage.getItem('userData');
       if (storedUserData) {
         const storedUser = JSON.parse(storedUserData);
-        email = storedUser.email;
+        email = storedUser.email || storedUser.id;
       }
     }
     
@@ -163,8 +163,24 @@ export const localAuth = {
       throw new Error('Invalid token or user data not found');
     }
 
-    const userData = await AsyncStorage.getItem(`localUser_${email}`);
+    let userData = await AsyncStorage.getItem(`localUser_${email}`);
+    
     if (!userData) {
+      // If localUser doesn't exist, try to get from userData
+      console.log('⚠️ Local user cache not found, using userData');
+      const storedUserData = await AsyncStorage.getItem('userData');
+      if (storedUserData) {
+        const storedUser = JSON.parse(storedUserData);
+        return {
+          email: storedUser.email || storedUser.id || email,
+          username: storedUser.username || email.split('@')[0],
+          id: storedUser.id || storedUser.email || email,
+          createdAt: new Date().toISOString(),
+          name: storedUser.name || storedUser.username,
+          bio: storedUser.bio || '',
+          profilePicture: storedUser.profilePicture,
+        };
+      }
       throw new Error('User not found');
     }
 
@@ -174,7 +190,7 @@ export const localAuth = {
       username: user.username,
       id: user.email,
       createdAt: user.createdAt,
-      name: user.username,
+      name: user.name || user.username,
       bio: (user as any).bio,
       profilePicture: (user as any).profilePicture,
     };
@@ -193,7 +209,7 @@ export const localAuth = {
       const storedUserData = await AsyncStorage.getItem('userData');
       if (storedUserData) {
         const storedUser = JSON.parse(storedUserData);
-        email = storedUser.email;
+        email = storedUser.email || storedUser.id;
       }
     }
     
@@ -201,12 +217,30 @@ export const localAuth = {
       throw new Error('Invalid token or user data not found');
     }
 
-    const userData = await AsyncStorage.getItem(`localUser_${email}`);
+    let userData = await AsyncStorage.getItem(`localUser_${email}`);
+    let user: any;
+    
     if (!userData) {
-      throw new Error('User not found');
+      // If localUser doesn't exist, create it from userData
+      console.log('⚠️ Local user cache not found, creating from userData');
+      const storedUserData = await AsyncStorage.getItem('userData');
+      if (storedUserData) {
+        const storedUser = JSON.parse(storedUserData);
+        user = {
+          email: storedUser.email || storedUser.id || email,
+          username: storedUser.username || email.split('@')[0],
+          passwordHash: '', // Empty for backend users without cached password
+          createdAt: new Date().toISOString(),
+          name: storedUser.name || storedUser.username,
+          bio: storedUser.bio || '',
+          profilePicture: storedUser.profilePicture || undefined,
+        };
+      } else {
+        throw new Error('User not found');
+      }
+    } else {
+      user = JSON.parse(userData);
     }
-
-    const user: any = JSON.parse(userData);
     
     // Update fields
     if (updates.username) {

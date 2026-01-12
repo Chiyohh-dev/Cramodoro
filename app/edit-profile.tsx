@@ -119,11 +119,18 @@ export default function EditProfile() {
         username?: string; 
         bio?: string; 
         profilePicture?: string;
-      } = { 
-        name,
-        username: name, 
-        bio
-      };
+      } = {};
+      
+      // Only add name/username if they are valid (not empty)
+      if (name && name.trim()) {
+        updateData.name = name.trim();
+        updateData.username = name.trim();
+      }
+      
+      // Bio can be empty
+      if (bio !== undefined) {
+        updateData.bio = bio;
+      }
 
       // Only include profile picture if it has changed (has uri property)
       if (profilePic && typeof profilePic === 'object' && 'uri' in profilePic) {
@@ -157,6 +164,15 @@ export default function EditProfile() {
           console.log('☁️ Syncing to backend');
           await userAPI.updateProfile(token, updateData);
           console.log('✅ Profile synced to backend');
+          
+          // Fetch updated profile from backend to re-cache with latest data
+          try {
+            const profileResponse = await userAPI.getProfile(token);
+            await AsyncStorage.setItem('userData', JSON.stringify(profileResponse.user));
+            console.log('✅ Profile data refreshed from backend');
+          } catch (refreshErr) {
+            console.log('⚠️ Could not refresh profile from backend');
+          }
         } catch (backendErr) {
           console.log('⚠️ Backend sync failed, queued for later');
           await syncManager.queueSync('profile', 'update', updateData);

@@ -134,9 +134,8 @@ export default function Login() {
       await AsyncStorage.setItem('authToken', response.token);
       await AsyncStorage.setItem('userData', JSON.stringify(response.user));
       
-      // Clear decks for account isolation - will be loaded fresh per user
-      await AsyncStorage.removeItem('decks');
-      console.log('🧹 Cleared local decks for account isolation');
+      // Don't clear decks yet - let MongoDB sync handle it properly
+      console.log('✅ Login successful, will sync decks with backend');
       
       // For offline users, load their user-specific decks
       if (response.token.startsWith('offline_')) {
@@ -158,18 +157,23 @@ export default function Login() {
         }
       }
       
-      // If backend available, sync MongoDB data to local storage
+      // If backend available, sync MongoDB data with local storage
       if (isBackendAvailable && !response.token.startsWith('offline_')) {
         try {
           console.log('📥 Syncing MongoDB data with local storage...');
+          
+          // Get existing local decks first
+          const existingDecksStr = await AsyncStorage.getItem('decks');
+          const existingDecks = existingDecksStr ? JSON.parse(existingDecksStr) : [];
           
           // Get MongoDB decks for THIS user
           const decksResponse = await deckAPI.getDecks(response.token);
           const mongoDecks = decksResponse?.decks || [];
           console.log(`☁️ Found ${mongoDecks.length} MongoDB decks for this user`);
+          console.log(`📱 Found ${existingDecks.length} local decks`);
           
           if (mongoDecks.length > 0) {
-            // MongoDB has decks - replace local storage with THIS user's decks only
+            // MongoDB has decks - use MongoDB as source of truth
             const userDecks = mongoDecks.map((mongoDeck: any) => ({
               id: mongoDeck._id,
               name: mongoDeck.name,
@@ -180,9 +184,14 @@ export default function Login() {
             
             await AsyncStorage.setItem('decks', JSON.stringify(userDecks));
             console.log(`✅ Loaded ${userDecks.length} decks for this user from MongoDB`);
+          } else if (existingDecks.length > 0) {
+            // No MongoDB decks but we have local decks - keep them and queue for sync
+            console.log(`📦 No MongoDB decks, keeping ${existingDecks.length} local decks and queuing for sync`);
+            // Don't clear local decks, they will be synced
           } else {
-            // No MongoDB decks - ensure clean start
-            console.log('📦 No decks found in MongoDB for this user');
+            // No decks anywhere - ensure clean start
+            console.log('📦 No decks found in MongoDB or locally for this user');
+            await AsyncStorage.setItem('decks', JSON.stringify([]));
           }
         } catch (syncErr) {
           console.error('⚠️ Failed to sync MongoDB data:', syncErr);
@@ -190,11 +199,9 @@ export default function Login() {
         }
       }
       
-      // Clear all old cached accounts and sync queue for fresh login
+      // Setup auto-sync for backend accounts (don't clear sync queue - let it sync)
       if (response.token && isBackendAvailable) {
-        await localAuth.clearAllCachedAccounts();
-        await syncManager.clearSyncQueue();
-        console.log('🧹 Cleared all cached accounts and sync queue for fresh login');
+        console.log('🔄 Setting up auto-sync');
         syncManager.setupAutoSync(response.token);
         await syncManager.syncToBackend(response.token);
       }
@@ -321,6 +328,34 @@ export default function Login() {
                 📋 List Cached Accounts
               </Text>
             </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.clearButton}
+              onPress={async () => {
+                Alert.alert(
+                  'Clear Cached Accounts',
+                  'This will remove all locally cached accounts. You will need internet to login again. Continue?',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Clear All',
+                      style: 'destructive',
+                      onPress: async () => {
+                        try {
+                          const count = await localAuth.clearAllCachedAccounts();
+                          Alert.alert('Success', `Cleared ${count} cached account(s)`);
+                        } catch (err) {
+                          Alert.alert('Error', 'Failed to clear cached accounts');
+                        }
+                      }
+                    }
+                  ]
+                );
+              }}
+            >
+              <Text style={styles.clearButtonText}>
+                🗑️ Clear All Cached Accounts
+              </Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -434,9 +469,23 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     borderWidth: 1,
     borderColor: '#2196F3',
+    marginBottom: 10,
   },
   debugButtonText: {
     color: '#2196F3',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  clearButton: {
+    backgroundColor: '#fff',
+    padding: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#DC3545',
+  },
+  clearButtonText: {
+    color: '#DC3545',
     fontSize: 14,
     fontWeight: '500',
   },
